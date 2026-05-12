@@ -1,3 +1,4 @@
+//原脚本版本d9975a9 修复相似影片无法跳转的问题
 class ExtraFanart {
 	// ===== 性能优化：取消无效请求 =====
 	static currentAbortController = null;
@@ -120,7 +121,8 @@ class ExtraFanart {
 			subtree = true,
 			attributes = false,
 			childList = true,
-			characterData = false
+			characterData = false,
+			timeoutCallback = null  // 新增：超时时的回调
 		} = options;
 
 		// 在顶部显式声明 timeoutId，避免 ReferenceError
@@ -150,6 +152,8 @@ class ExtraFanart {
 		timeoutId = setTimeout(() => {
 			observer.disconnect();
 			console.log('[ExtraFanart] MutationObserver 超时:', targetSelector);
+			// 超时时执行回调（如兜底插入）
+			if (timeoutCallback) timeoutCallback();
 		}, timeout);
 
 		// 立即检查一次，如果元素已存在
@@ -919,9 +923,41 @@ class ExtraFanart {
 				},
 				{
 					parentSelector: detailPageParent === document.body ? 'body' : undefined,
-					timeout: 15000, // 15秒超时
+					timeout: 15000,
 					subtree: true,
-					childList: true
+					childList: true,
+					// 修复：无演员信息的番号 castCollapsible/peopleSection 永远不出现
+					// 超时后用更稳定的兜底锚点强制插入容器
+					timeoutCallback: () => {
+						if (!this.isDetailsPage()) return;
+						// 已经被插入则跳过
+						const detailPage = document.querySelector('#itemDetailPage:not(.hide), .itemView:not(.hide)');
+						if (detailPage && detailPage.contains(this.imageContainer)) return;
+
+						console.log('[ExtraFanart] 锚点等待超时，使用兜底锚点插入剧照容器');
+						const fallbackSelectors = [
+							'#itemDetailPage:not(.hide) .detailPagePrimaryContainer',
+							'.itemView:not(.hide) .detailPagePrimaryContainer',
+							'#itemDetailPage:not(.hide) .itemDetailPage-infoContainer',
+							'#itemDetailPage:not(.hide) .mainDetailButtons',
+							'#itemDetailPage:not(.hide) .detailRibbon',
+							'#itemDetailPage:not(.hide) .nameContainer',
+							'.itemView:not(.hide) .nameContainer',
+							'#itemDetailPage:not(.hide)',
+							'.itemView:not(.hide)',
+						];
+						let fallbackAnchor = null;
+						for (const sel of fallbackSelectors) {
+							fallbackAnchor = document.querySelector(sel);
+							if (fallbackAnchor) break;
+						}
+						if (fallbackAnchor) {
+							console.log('[ExtraFanart] 兜底锚点:', fallbackAnchor.className || fallbackAnchor.id);
+							this.insertContainerAfterAnchor(imageCount, fallbackAnchor);
+						} else {
+							console.log('[ExtraFanart] 兜底锚点也未找到，放弃插入');
+						}
+					}
 				}
 			);
 			return;
@@ -1083,19 +1119,25 @@ static isDetailsPage() {
 		}
 		
 		// 延迟恢复相似影片、演员作品和番号，确保剧照容器先稳定
-		setTimeout(() => {
+		// 修复：showContainer() 内部用 MutationObserver 异步插入容器，
+		// 原来 setTimeout(fn, 0) 立刻检查必然失败，改为轮询等待容器就绪
+		const waitAndRestore = (retryCount = 0) => {
 			// 再次检查 itemId，确保没有切换到其他页面
 			if (this.itemId !== currentItemId) return;
-			
-			// 再次确认剧照容器在正确位置
+
 			const detailPageCheck = document.querySelector('#itemDetailPage:not(.hide), .itemView:not(.hide)');
-			const imageContainerReady = this.imageContainer && 
-			                            detailPageCheck && 
+			const imageContainerReady = this.imageContainer &&
+			                            detailPageCheck &&
 			                            detailPageCheck.contains(this.imageContainer) &&
 			                            this.imageContainer.style.display === 'block';
-			
+
 			if (!imageContainerReady) {
-				console.log('[ExtraFanart] 剧照容器未就绪，取消恢复其他容器');
+				// 最多等待 16 秒（每 500ms 重试一次，共 32 次）
+				if (retryCount < 32) {
+					setTimeout(() => waitAndRestore(retryCount + 1), 500);
+				} else {
+					console.log('[ExtraFanart] 剧照容器等待超时，取消恢复其他容器');
+				}
 				return;
 			}
 			
@@ -1190,7 +1232,7 @@ static isDetailsPage() {
 					}
 				}
 			}
-		}, 150);
+		}; waitAndRestore();
 		
 		return;
 	}	this.isLoading = true;
@@ -1966,6 +2008,15 @@ static isDetailsPage() {
 				img.addEventListener('load', adjustImageFit);
 			}
 		}
+
+		// 点击卡片跳转到对应详情页（与演员作品卡片逻辑一致）
+		card.onclick = () => {
+			if (typeof Emby !== 'undefined' && Emby.Page && Emby.Page.showItem) {
+				Emby.Page.showItem(item.Id);
+			} else {
+				window.location.hash = `#!/item?id=${item.Id}`;
+			}
+		};
 		
 		return card;
 	}
